@@ -1,0 +1,15 @@
+publish_zero_outputs: False 
+low_position_error: 1.0
+max_position_error: 1.3 
+
+kp: 2.0
+kd: 1.0
+ki: 0.0
+saturation: 0.5
+antiwindup: 0.5
+
+low_heading_error: 0.5
+max_heading_error: 0.75
+
+max_cmd_heading_rate: 0.5
+max_cmd_velocity: 1.5
