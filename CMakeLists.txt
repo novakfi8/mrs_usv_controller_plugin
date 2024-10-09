@@ -31,7 +31,7 @@ set(Eigen_INCLUDE_DIRS ${EIGEN3_INCLUDE_DIRS})
 set(Eigen_LIBRARIES ${Eigen_LIBRARIES})
 
 set(LIBRARIES
-  MrsUsvController
+  MrsUsvControllerPlugin_MrsUsvController
   )
 
 catkin_package(
@@ -49,17 +49,17 @@ include_directories(
 
 # MRS USV Controller
 
-add_library(MrsUsvController
+add_library(MrsUsvControllerPlugin_MrsUsvController
   src/mrs_usv_controller.cpp
   )
 
-add_dependencies(MrsUsvController
+add_dependencies(MrsUsvControllerPlugin_MrsUsvController
   ${${PROJECT_NAME}_EXPORTED_TARGETS}
   ${catkin_EXPORTED_TARGETS}
   ${PROJECT_NAME}_gencfg
   )
 
-target_link_libraries(MrsUsvController
+target_link_libraries(MrsUsvControllerPlugin_MrsUsvController
   ${catkin_LIBRARIES}
   )
 

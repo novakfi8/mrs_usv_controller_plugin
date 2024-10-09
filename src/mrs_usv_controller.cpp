@@ -156,7 +156,9 @@ bool MrsUsvController::initialize(const ros::NodeHandle& nh, std::shared_ptr<mrs
   success *= private_handlers->loadConfigFile(ros::package::getPath("mrs_usv_controller_plugin") + "/config/mrs_usv_controller.yaml");
 
   if (!success) {
+    ROS_ERROR("[MrsUsvController]: could not load all parameters!");
     return false;
+    /* return true; */
   }
 
   mrs_lib::ParamLoader param_loader(nh_, "MrsUsvController");
@@ -176,7 +178,8 @@ bool MrsUsvController::initialize(const ros::NodeHandle& nh, std::shared_ptr<mrs
   param_loader.loadParam("ki", drs_params_.ki);
   param_loader.loadParam("saturation", drs_params_.saturation);
   param_loader.loadParam("antiwindup", drs_params_.antiwindup);
-  pid_controller_.setParams(drs_params_.kp, drs_params_.kd, drs_params_.ki, drs_params_.saturation, drs_params_.antiwindup);
+  /* pid_controller_.setParams(drs_params_.kp, drs_params_.kd, drs_params_.ki, drs_params_.saturation, drs_params_.antiwindup); */
+  pid_controller_.setParams(drs_params_.kp, 0, drs_params_.ki, drs_params_.saturation, drs_params_.antiwindup);
 
   param_loader.loadParam("low_heading_error", drs_params_.low_heading_error);
   param_loader.loadParam("max_heading_error", drs_params_.max_heading_error);
@@ -189,6 +192,7 @@ bool MrsUsvController::initialize(const ros::NodeHandle& nh, std::shared_ptr<mrs
   if (!param_loader.loadedSuccessfully()) {
     ROS_ERROR("[MrsUsvController]: could not load all parameters!");
     return false;
+    /* return true; */
   }
 
   // | ---------------- initialize PID controller --------------- |
@@ -438,7 +442,8 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   // | ---------------------- debug prints ---------------------- |
   ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Heading rate PID state: %s. Heading rate command: %.3f. Velocity command: [%.3f, %.3f, %.3f]", getHeadingRatePidStateName(pid_state_).c_str(), cmd_heading_rate, cmd_velocity.x, cmd_velocity.y, cmd_velocity.z);
   ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Position reference: [%.3f, %.3f, %.3f]. Heading desired: %.3f.", position_reference.pose.position.x, position_reference.pose.position.y,position_reference.pose.position.z, heading_desired);
-  ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Current position: [%.3f, %.3f, %.3f]. Current heading: %.3f.", position_reference.pose.position.x, position_reference.pose.position.y,position_reference.pose.position.z, usv_heading);
+  ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Current position: [%.3f, %.3f, %.3f]. Current heading: %.3f.", uav_state.pose.position.x, uav_state.pose.position.y, uav_state.pose.position.z, usv_heading);
+  ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Heading error: %.3f. Position error: %.3f.", heading_error, diff_position.norm());
   ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: -------------------------------------------------------------");
 
   return last_control_output_;
@@ -498,6 +503,7 @@ const mrs_msgs::DynamicsConstraintsSrvResponse::ConstPtr MrsUsvController::setCo
 /* stateMachineFunction() //{ */
 
 int  MrsUsvController::stateMachineFunction(int pid_state, double heading_error, double position_error, DrsConfig_t drs_params) {
+    heading_error = std::abs(heading_error);  
     /* idle state */ 
     if(pid_state == PidController::states::idle){
       if(position_error > drs_params.max_position_error){   
@@ -533,6 +539,7 @@ int  MrsUsvController::stateMachineFunction(int pid_state, double heading_error,
       return PidController::states::heading_and_velocity; 
     } 
     ROS_ERROR("[MrsUsvController]: Unknown state in pid_state: %d! Switch to idle.", pid_state);
+    return PidController::states::idle;
 }
 
 //}
@@ -549,8 +556,9 @@ void MrsUsvController::callbackDrs(mrs_usv_controller_plugin::mrs_usv_controller
   {
     std::scoped_lock lock(mutex_drs_params_, mutex_heading_rate_pid_);
     drs_params_ = config;
-    pid_controller_.setParams(drs_params_.kp, drs_params_.kd, drs_params_.ki, drs_params_.saturation, drs_params_.antiwindup); 
-  }
+    /* pid_controller_.setParams(drs_params_.kp, drs_params_.kd, drs_params_.ki, drs_params_.saturation, drs_params_.antiwindup); */ 
+    pid_controller_.setParams(drs_params_.kp, 0, drs_params_.ki, drs_params_.saturation, drs_params_.antiwindup); 
+  } 
 
   ROS_INFO("[MrsUsvController]: dynamic reconfigure params updated");
 }
