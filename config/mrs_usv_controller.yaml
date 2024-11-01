@@ -19,15 +19,15 @@ max_heading_error: 0.5
 
 ## | --------------------- PID - position --------------------- #
 kp_position: 0.4
-kd_position: 0.0
-ki_position: 0.0
-saturation_position: 1.0
-antiwindup_position: 0.5
+kd_position: 0.01
+ki_position: 0.001
+saturation_position: 2.0
+antiwindup_position: 5.0
 
 ## | ---------------------- PID - heading --------------------- #
 kp_heading_rate: 1.0
-kd_heading_rate: 0.0
-ki_heading_rate: 0.0
+kd_heading_rate: 0.01
+ki_heading_rate: 0.001
 saturation_heading_rate: 0.5
 antiwindup_heading_rate: 0.5
 
