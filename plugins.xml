@@ -3,3 +3,9 @@
     <description>This is the MRS USV Controller.</description>
   </class>
 </library>
+
+<library path="lib/libMrsUsvControllerPlugin_PositionController">
+  <class name="mrs_usv_controller_plugin/PositionController" type="mrs_usv_controller_plugin::position_controller::PositionController" base_class_type="mrs_uav_managers::Controller">
+    <description>This is the MRS USV Position Controller.</description>
+  </class>
+</library>

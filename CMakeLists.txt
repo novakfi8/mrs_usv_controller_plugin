@@ -19,6 +19,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 generate_dynamic_reconfigure_options(
   cfg/mrs_usv_controller.cfg
+  cfg/position_controller.cfg
   )
 
 set(CMAKE_CXX_STANDARD 17)
@@ -32,6 +33,7 @@ set(Eigen_LIBRARIES ${Eigen_LIBRARIES})
 
 set(LIBRARIES
   MrsUsvControllerPlugin_MrsUsvController
+  MrsUsvControllerPlugin_PositionController
   )
 
 catkin_package(
@@ -61,6 +63,24 @@ add_dependencies(MrsUsvControllerPlugin_MrsUsvController
 
 target_link_libraries(MrsUsvControllerPlugin_MrsUsvController
   ${catkin_LIBRARIES}
+  )
+
+# Position controller
+
+add_library(MrsUsvControllerPlugin_PositionController
+  src/position_controller.cpp
+  )
+
+add_dependencies(MrsUsvControllerPlugin_PositionController
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+  ${PROJECT_NAME}_gencfg
+  )
+
+target_link_libraries(MrsUsvControllerPlugin_PositionController
+  ${catkin_LIBRARIES}
+  ${MPC_CONTROLLER_SOLVER_BIN}
+  ${Eigen_LIBRARIES}
   )
 
 ## --------------------------------------------------------------
