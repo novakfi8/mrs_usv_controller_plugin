@@ -108,11 +108,15 @@ private:
   std::atomic<bool> first_iteration_ = true;
 
   // | ----------------------- controller ----------------------- |
-  PIDController pid_controller_;
-  int pid_state_;
+  PIDController pid_controller_heading_rate_;
   std::mutex mutex_heading_rate_pid_;
+  
+  PIDController pid_controller_position_;
+  std::mutex mutex_position_pid_;
+  
+  int pid_state_;
   std::mutex mutex_pid_state_;
-
+  
   // | -------------------------- utils ------------------------- |
   int  stateMachineFunction(int pid_state, double heading_error, double position_error, DrsConfig_t drs_params);
   double getHeading(double x1, double y1, double x2, double y2, double rescue_heading);
@@ -156,6 +160,7 @@ bool MrsUsvController::initialize(const ros::NodeHandle& nh, std::shared_ptr<mrs
   success *= private_handlers->loadConfigFile(ros::package::getPath("mrs_usv_controller_plugin") + "/config/mrs_usv_controller.yaml");
 
   if (!success) {
+    ROS_ERROR("[MrsUsvController]: could not load all parameters!");
     return false;
   }
 
@@ -167,22 +172,34 @@ bool MrsUsvController::initialize(const ros::NodeHandle& nh, std::shared_ptr<mrs
   //
   // param_loader.addYamlFile(ros::package::getPath("mrs_usv_tracker_plugin") + "/config/mrs_usv_tracker.yaml");
 
+  param_loader.loadParam("debug", drs_params_.debug);
   param_loader.loadParam("publish_zero_outputs", drs_params_.publish_zero_outputs);
-  param_loader.loadParam("low_position_error", drs_params_.low_position_error);
-  param_loader.loadParam("max_position_error", drs_params_.max_position_error);
   
-  param_loader.loadParam("kp", drs_params_.kp);
-  param_loader.loadParam("kd", drs_params_.kd);
-  param_loader.loadParam("ki", drs_params_.ki);
-  param_loader.loadParam("saturation", drs_params_.saturation);
-  param_loader.loadParam("antiwindup", drs_params_.antiwindup);
-  pid_controller_.setParams(drs_params_.kp, drs_params_.kd, drs_params_.ki, drs_params_.saturation, drs_params_.antiwindup);
-
-  param_loader.loadParam("low_heading_error", drs_params_.low_heading_error);
-  param_loader.loadParam("max_heading_error", drs_params_.max_heading_error);
-  
+  param_loader.loadParam("desired_heading_to_final_reference", drs_params_.desired_heading_to_final_reference);
   param_loader.loadParam("max_cmd_heading_rate", drs_params_.max_cmd_heading_rate);
   param_loader.loadParam("max_cmd_velocity", drs_params_.max_cmd_velocity);
+  param_loader.loadParam("enforce_constraints", drs_params_.enforce_constraints);
+  param_loader.loadParam("horizontal_speed_constraint", drs_params_.horizontal_speed_constraint);
+  param_loader.loadParam("vertical_asc_speed_constraint", drs_params_.vertical_asc_speed_constraint);
+  
+  param_loader.loadParam("low_position_error", drs_params_.low_position_error);
+  param_loader.loadParam("max_position_error", drs_params_.max_position_error);
+  param_loader.loadParam("low_heading_error", drs_params_.low_heading_error);
+  param_loader.loadParam("max_heading_error", drs_params_.max_heading_error);
+ 
+  param_loader.loadParam("kp_position", drs_params_.kp_position);
+  param_loader.loadParam("kd_position", drs_params_.kd_position);
+  param_loader.loadParam("ki_position", drs_params_.ki_position);
+  param_loader.loadParam("saturation_position", drs_params_.saturation_position);
+  param_loader.loadParam("antiwindup_position", drs_params_.antiwindup_position);
+  pid_controller_position_.setParams(drs_params_.kp_position, drs_params_.kd_position, drs_params_.ki_position, drs_params_.saturation_position, drs_params_.antiwindup_position);
+  
+  param_loader.loadParam("kp_heading_rate", drs_params_.kp_heading_rate);
+  param_loader.loadParam("kd_heading_rate", drs_params_.kd_heading_rate);
+  param_loader.loadParam("ki_heading_rate", drs_params_.ki_heading_rate);
+  param_loader.loadParam("saturation_heading_rate", drs_params_.saturation_heading_rate);
+  param_loader.loadParam("antiwindup_heading_rate", drs_params_.antiwindup_heading_rate);
+  pid_controller_heading_rate_.setParams(drs_params_.kp_heading_rate, drs_params_.kd_heading_rate, drs_params_.ki_heading_rate, drs_params_.saturation_heading_rate, drs_params_.antiwindup_heading_rate);
 
   // | ------------------ finish loading params ----------------- |
 
@@ -236,6 +253,9 @@ void MrsUsvController::deactivate(void) {
 
   is_active_       = false;
   first_iteration_ = false;
+
+  pid_controller_position_.reset();
+  pid_controller_heading_rate_.reset();
 
   ROS_INFO("[MrsUsvController]: deactivated");
 }
@@ -315,6 +335,7 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   /* } */
 
   // | ------------------ prepare the usv state ----------------- |
+  
   double usv_heading = mrs_lib::AttitudeConverter(uav_state.pose.orientation).getHeading();
   Eigen::Vector2d usv_position_vec(uav_state.pose.position.x, uav_state.pose.position.y);
 
@@ -325,55 +346,67 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   position_reference.header           = tracker_command.header;
   position_reference.pose.position    = tracker_command.position;
   position_reference.pose.orientation = mrs_lib::AttitudeConverter(0, 0, 0).setHeading(tracker_command.heading);
-
-  Eigen::Vector2d position_reference_vec(position_reference.pose.position.x, position_reference.pose.position.y);
-  Eigen::Vector2d diff_position = position_reference_vec - usv_position_vec;
-
-  double heading_desired = getHeading(uav_state.pose.position.x, uav_state.pose.position.y, position_reference.pose.position.x, position_reference.pose.position.y, last_heading_desired_);
-  last_heading_desired_ = heading_desired;
   
-  double heading_error = sradians::diff(heading_desired, usv_heading);
+  Eigen::Vector2d position_reference_vec(position_reference.pose.position.x, position_reference.pose.position.y);
+
+  geometry_msgs::PoseStamped final_position_reference;
+  final_position_reference.header           = tracker_command.full_state_prediction.header;
+  final_position_reference.pose.orientation = mrs_lib::AttitudeConverter(0, 0, 0).setHeading(tracker_command.full_state_prediction.heading.back());
+  final_position_reference.pose.position    = tracker_command.full_state_prediction.position.back();
+  
+  Eigen::Vector2d final_position_reference_vec(final_position_reference.pose.position.x, final_position_reference.pose.position.y);
+ 
+  double desired_heading = 0;
+  if(drs_params.desired_heading_to_final_reference) {
+    desired_heading = getHeading(uav_state.pose.position.x, uav_state.pose.position.y, final_position_reference.pose.position.x, final_position_reference.pose.position.y, last_heading_desired_);
+  } else {
+    desired_heading = getHeading(uav_state.pose.position.x, uav_state.pose.position.y, position_reference.pose.position.x, position_reference.pose.position.y, last_heading_desired_);
+  }
+  last_heading_desired_ = desired_heading;  
+
+  // | ----------------- compute control errors ----------------- |
+  
+  Eigen::Vector2d position_error_vec = position_reference_vec - usv_position_vec;
+  Eigen::Vector2d final_position_error_vec = final_position_reference_vec - usv_position_vec;
+  double heading_error = sradians::diff(desired_heading, usv_heading);
 
   // | -------------- compute heading rate command -------------- |
-
+  
   double cmd_heading_rate = 0;
   {
     std::scoped_lock lock(mutex_heading_rate_pid_);
-    cmd_heading_rate = pid_controller_.update(heading_error, dt);
+    cmd_heading_rate = pid_controller_heading_rate_.update(heading_error, dt);
   }
 
-  // | ---------------- compute velocity command ---------------- |
+  // | ---------------- compute velocity command ---------------- | 
   
-  auto cmd_velocity = tracker_command.velocity;
+  /* auto cmd_velocity = tracker_command.velocity; */
+  double cmd_velocity = 0;
+  {
+    std::scoped_lock lock(mutex_position_pid_);
+    cmd_velocity = pid_controller_position_.update(position_error_vec.norm(), dt);
+  }
 
   // | -------------------- apply constraints ------------------- |
+  
   if(cmd_heading_rate > drs_params.max_cmd_heading_rate){
-    cmd_heading_rate = drs_params.max_heading_error; 
+    cmd_heading_rate = drs_params.max_cmd_heading_rate; 
   }
   else if(cmd_heading_rate < -drs_params.max_cmd_heading_rate){
-    cmd_heading_rate = -drs_params.max_heading_error; 
+    cmd_heading_rate = -drs_params.max_cmd_heading_rate; 
   }
-
-  cmd_velocity.x = drs_params.kd*diff_position.norm();
-  cmd_velocity.y = 0;
-  cmd_velocity.z = 0;
-  Eigen::Vector2d cmd_velocity_vec = Eigen::Vector2d(cmd_velocity.x, cmd_velocity.y);
-  double cmd_velocity_norm = cmd_velocity_vec.norm();
-  if(cmd_velocity_norm > drs_params.max_cmd_velocity){
-    if(cmd_velocity_norm != 0){
-     cmd_velocity_vec = drs_params.max_cmd_velocity*cmd_velocity_vec/cmd_velocity_norm; 
-    }
-    else{ 
-     cmd_velocity_vec = Eigen::Vector2d(0, 0); 
-    }
-    cmd_velocity.x = cmd_velocity_vec.x();
-    cmd_velocity.y = cmd_velocity_vec.y();
-    cmd_velocity.z = 0;
+  
+  if(cmd_velocity > drs_params.max_cmd_velocity){
+    cmd_velocity = drs_params.max_cmd_velocity; 
+  }
+  else if(cmd_velocity < -drs_params.max_cmd_velocity){
+    cmd_velocity = -drs_params.max_cmd_velocity; 
   }
 
   // | ---------------- prepare the control output --------------- |
-
-  pid_state_ = stateMachineFunction(pid_state_, heading_error, diff_position.norm(), drs_params);
+ 
+  double position_error_max = std::max({position_error_vec.norm(), final_position_error_vec.norm()});
+  pid_state_ = stateMachineFunction(pid_state_, heading_error, position_error_max, drs_params);
 
   mrs_msgs::HwApiVelocityHdgRateCmd velocity_heading_rate_cmd;
   if(pid_state_ == PidController::states::idle){
@@ -390,10 +423,7 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   }
   else if(pid_state_ == PidController::states::heading_and_velocity){
     velocity_heading_rate_cmd.heading_rate = cmd_heading_rate; 
-    
-    velocity_heading_rate_cmd.velocity = cmd_velocity;
-    
-    /* velocity_heading_rate_cmd.velocity.x = drs_params.kd*diff_position.norm(); */
+    velocity_heading_rate_cmd.velocity.x = cmd_velocity;
     velocity_heading_rate_cmd.velocity.y = 0;
     velocity_heading_rate_cmd.velocity.z = 0;
   }
@@ -403,6 +433,7 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   }
   
   // | ----------------- check for zero outputs ----------------- |
+  
   if(drs_params.publish_zero_outputs){
     velocity_heading_rate_cmd.velocity.x = 0;
     velocity_heading_rate_cmd.velocity.y = 0;
@@ -421,25 +452,29 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   /// this is used for:
   // * plotting the orientation in the control_refence topic (optional)
   // * checking for attitude control error
-  last_control_output_.desired_orientation = mrs_lib::AttitudeConverter(0, 0, 0).setHeading(tracker_command.heading);
+  last_control_output_.desired_orientation = mrs_lib::AttitudeConverter(0, 0, 0).setHeading(desired_heading);
   /// IMPORANT
   // The acceleration and heading rate in 3D (expressed in the "fcu" frame of reference) that the UAV will actually undergo due to the control action.
   last_control_output_.desired_unbiased_acceleration = Eigen::Vector3d(0, 0, 0);
-  last_control_output_.desired_heading_rate          = 0;
+  last_control_output_.desired_heading_rate          = cmd_heading_rate;
 
-  last_control_output_.diagnostics.controller_enforcing_constraints = true;
-  last_control_output_.diagnostics.horizontal_speed_constraint = 0.35;
-  last_control_output_.diagnostics.vertical_asc_speed_constraint = 0.35;
+  last_control_output_.diagnostics.controller_enforcing_constraints = drs_params.enforce_constraints;
+  last_control_output_.diagnostics.horizontal_speed_constraint = drs_params.horizontal_speed_constraint;
+  last_control_output_.diagnostics.vertical_asc_speed_constraint = drs_params.vertical_asc_speed_constraint;
 
   // | ----------------- fill in the diagnostics ---------------- |
 
   last_control_output_.diagnostics.controller = "MrsUsvController";
 
   // | ---------------------- debug prints ---------------------- |
-  ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Heading rate PID state: %s. Heading rate command: %.3f. Velocity command: [%.3f, %.3f, %.3f]", getHeadingRatePidStateName(pid_state_).c_str(), cmd_heading_rate, cmd_velocity.x, cmd_velocity.y, cmd_velocity.z);
-  ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Position reference: [%.3f, %.3f, %.3f]. Heading desired: %.3f.", position_reference.pose.position.x, position_reference.pose.position.y,position_reference.pose.position.z, heading_desired);
-  ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Current position: [%.3f, %.3f, %.3f]. Current heading: %.3f.", position_reference.pose.position.x, position_reference.pose.position.y,position_reference.pose.position.z, usv_heading);
-  ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: -------------------------------------------------------------");
+  
+  if(drs_params.debug) {
+    ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Heading rate PID state: %s. Heading rate command: %.3f. Velocity command: [%.3f, %.3f, %.3f]", getHeadingRatePidStateName(pid_state_).c_str(), cmd_heading_rate, velocity_heading_rate_cmd.velocity.x, velocity_heading_rate_cmd.velocity.y, velocity_heading_rate_cmd.velocity.z);
+    ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Position reference: [%.3f, %.3f, %.3f]. Heading desired: %.3f.", position_reference.pose.position.x, position_reference.pose.position.y,position_reference.pose.position.z, desired_heading);
+    ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Current position: [%.3f, %.3f, %.3f]. Current heading: %.3f.", uav_state.pose.position.x, uav_state.pose.position.y, uav_state.pose.position.z, usv_heading);
+    ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Heading error: %.3f. Position error: %.3f.", heading_error, position_error_vec.norm());
+    ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: -------------------------------------------------------------");
+  }
 
   return last_control_output_;
 }
@@ -498,6 +533,7 @@ const mrs_msgs::DynamicsConstraintsSrvResponse::ConstPtr MrsUsvController::setCo
 /* stateMachineFunction() //{ */
 
 int  MrsUsvController::stateMachineFunction(int pid_state, double heading_error, double position_error, DrsConfig_t drs_params) {
+    heading_error = std::abs(heading_error);  
     /* idle state */ 
     if(pid_state == PidController::states::idle){
       if(position_error > drs_params.max_position_error){   
@@ -506,6 +542,9 @@ int  MrsUsvController::stateMachineFunction(int pid_state, double heading_error,
         }
         return PidController::states::only_heading; 
       }
+      // goal reached - reset controllers
+      pid_controller_position_.reset();
+      pid_controller_heading_rate_.reset();
       return PidController::states::idle;
     } 
     /* only heading state */ 
@@ -533,6 +572,7 @@ int  MrsUsvController::stateMachineFunction(int pid_state, double heading_error,
       return PidController::states::heading_and_velocity; 
     } 
     ROS_ERROR("[MrsUsvController]: Unknown state in pid_state: %d! Switch to idle.", pid_state);
+    return PidController::states::idle;
 }
 
 //}
@@ -545,12 +585,13 @@ int  MrsUsvController::stateMachineFunction(int pid_state, double heading_error,
 
 void MrsUsvController::callbackDrs(mrs_usv_controller_plugin::mrs_usv_controllerConfig& config, [[maybe_unused]] uint32_t level) {
 
-  /* mrs_lib::set_mutexed(mutex_drs_params_, config, drs_params_); */
+  mrs_lib::set_mutexed(mutex_drs_params_, config, drs_params_);
+  
   {
-    std::scoped_lock lock(mutex_drs_params_, mutex_heading_rate_pid_);
-    drs_params_ = config;
-    pid_controller_.setParams(drs_params_.kp, drs_params_.kd, drs_params_.ki, drs_params_.saturation, drs_params_.antiwindup); 
-  }
+    std::scoped_lock lock(mutex_position_pid_, mutex_heading_rate_pid_);
+    pid_controller_position_.setParams(drs_params_.kp_position, drs_params_.kd_position, drs_params_.ki_position, drs_params_.saturation_position, drs_params_.antiwindup_position); 
+    pid_controller_heading_rate_.setParams(drs_params_.kp_heading_rate, drs_params_.kd_heading_rate, drs_params_.ki_heading_rate, drs_params_.saturation_heading_rate, drs_params_.antiwindup_heading_rate); 
+  } 
 
   ROS_INFO("[MrsUsvController]: dynamic reconfigure params updated");
 }

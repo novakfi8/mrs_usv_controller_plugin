@@ -1,5 +1,5 @@
-<library path="lib/libMrsUsvController">
+<library path="lib/libMrsUsvControllerPlugin_MrsUsvController">
   <class name="mrs_usv_controller_plugin/MrsUsvController" type="mrs_usv_controller_plugin::mrs_usv_controller::MrsUsvController" base_class_type="mrs_uav_managers::Controller">
-    <description>This is the MRS BlueBoat Controller.</description>
+    <description>This is the MRS USV Controller.</description>
   </class>
 </library>
