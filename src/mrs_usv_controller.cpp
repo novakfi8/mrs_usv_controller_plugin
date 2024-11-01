@@ -367,6 +367,7 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   // | ----------------- compute control errors ----------------- |
   
   Eigen::Vector2d position_error_vec = position_reference_vec - usv_position_vec;
+  Eigen::Vector2d final_position_error_vec = final_position_reference_vec - usv_position_vec;
   double heading_error = sradians::diff(desired_heading, usv_heading);
 
   // | -------------- compute heading rate command -------------- |
@@ -403,8 +404,9 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   }
 
   // | ---------------- prepare the control output --------------- |
-  
-  pid_state_ = stateMachineFunction(pid_state_, heading_error, position_error_vec.norm(), drs_params);
+ 
+  double position_error_max = std::max({position_error_vec.norm(), final_position_error_vec.norm()});
+  pid_state_ = stateMachineFunction(pid_state_, heading_error, position_error_max, drs_params);
 
   mrs_msgs::HwApiVelocityHdgRateCmd velocity_heading_rate_cmd;
   if(pid_state_ == PidController::states::idle){
