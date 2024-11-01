@@ -542,6 +542,9 @@ int  MrsUsvController::stateMachineFunction(int pid_state, double heading_error,
         }
         return PidController::states::only_heading; 
       }
+      // goal reached - reset controllers
+      pid_controller_position_.reset();
+      pid_controller_heading_rate_.reset();
       return PidController::states::idle;
     } 
     /* only heading state */ 
