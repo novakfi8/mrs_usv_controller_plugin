@@ -1,0 +1,7 @@
+mrs_uav_controllers:
+
+  mrs_usv_controller_plugin:
+    
+    position_controller:
+      debug: True
+      stop_publishing: True

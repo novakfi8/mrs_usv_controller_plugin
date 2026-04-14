@@ -1,1 +1,7 @@
-publish_zero_outputs: False 
+mrs_uav_controllers:
+
+  mrs_usv_controller_plugin:
+    
+    passthrough_controller:
+      debug: True
+      publish_zero_outputs: True

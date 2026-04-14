@@ -1,18 +1,15 @@
 /* includes //{ */
 
-#include <ros/ros.h>
-#include <ros/package.h>
-
-#include <pid.hpp>
+#include <rclcpp/rclcpp.hpp>
 
 #include <mrs_uav_managers/controller.h>
 
-#include <dynamic_reconfigure/server.h>
-#include <mrs_usv_controller_plugin/passthrough_controllerConfig.h>
-
+#include <mrs_lib/dynparam_mgr.h>
 #include <mrs_lib/param_loader.h>
 #include <mrs_lib/mutex.h>
 #include <mrs_lib/attitude_converter.h>
+
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 //}
 
@@ -22,32 +19,46 @@ namespace mrs_usv_controller_plugin
 namespace passthrough_controller
 {
 
+/* DrsParams_t //{ */
+
+struct DrsParams_t
+{
+  bool debug;
+  bool publish_zero_outputs;
+};
+
+//}
+
 /* //{ class PassthroughController */
 
 class PassthroughController : public mrs_uav_managers::Controller {
 
 public:
-  bool initialize(const ros::NodeHandle& nh, std::shared_ptr<mrs_uav_managers::control_manager::CommonHandlers_t> common_handlers,
+  bool initialize(const rclcpp::Node::SharedPtr &node, std::shared_ptr<mrs_uav_managers::control_manager::CommonHandlers_t> common_handlers,
                   std::shared_ptr<mrs_uav_managers::control_manager::PrivateHandlers_t> private_handlers);
 
-  bool activate(const ControlOutput& last_control_output);
+  bool activate(const ControlOutput &last_control_output);
 
   void deactivate(void);
 
-  void updateInactive(const mrs_msgs::UavState& uav_state, const std::optional<mrs_msgs::TrackerCommand>& tracker_command);
+  void destroy(void);
 
-  ControlOutput updateActive(const mrs_msgs::UavState& uav_state, const mrs_msgs::TrackerCommand& tracker_command);
+  void updateInactive(const mrs_msgs::msg::UavState &uav_state, const std::optional<mrs_msgs::msg::TrackerCommand> &tracker_command);
 
-  const mrs_msgs::ControllerStatus getStatus();
+  ControlOutput updateActive(const mrs_msgs::msg::UavState &uav_state, const mrs_msgs::msg::TrackerCommand &tracker_command);
 
-  void switchOdometrySource(const mrs_msgs::UavState& new_uav_state);
+  const mrs_msgs::msg::ControllerStatus getStatus();
+
+  void switchOdometrySource(const mrs_msgs::msg::UavState &new_uav_state);
 
   void resetDisturbanceEstimators(void);
 
-  const mrs_msgs::DynamicsConstraintsSrvResponse::ConstPtr setConstraints(const mrs_msgs::DynamicsConstraintsSrvRequest::ConstPtr& cmd);
+  const std::shared_ptr<mrs_msgs::srv::DynamicsConstraintsSrv::Response>
+  setConstraints(const std::shared_ptr<mrs_msgs::srv::DynamicsConstraintsSrv::Request> &constraints);
 
 private:
-  ros::NodeHandle nh_;
+  rclcpp::Node::SharedPtr  node_;
+  rclcpp::Clock::SharedPtr clock_;
 
   std::string node_name = "MrsUsvController_PassthroughController";
   
@@ -59,23 +70,19 @@ private:
 
   // | ------------------------ uav state ----------------------- |
 
-  mrs_msgs::UavState uav_state_;
-  std::mutex         mutex_uav_state_;
+  mrs_msgs::msg::UavState uav_state_;
+  std::mutex              mutex_uav_state_;
 
   // | --------------- dynamic reconfigure server --------------- |
 
-  boost::recursive_mutex                                      mutex_drs_;
-  typedef mrs_usv_controller_plugin::passthrough_controllerConfig DrsConfig_t;
-  typedef dynamic_reconfigure::Server<DrsConfig_t>            Drs_t;
-  boost::shared_ptr<Drs_t>                                    drs_;
-  void                                                        callbackDrs(mrs_usv_controller_plugin::passthrough_controllerConfig& config, uint32_t level);
-  DrsConfig_t                                                 drs_params_;
-  std::mutex                                                  mutex_drs_params_;
+  std::shared_ptr<mrs_lib::DynparamMgr> dynparam_mgr_;
+  std::mutex                            mutex_dynparam_mgr_;
+  DrsParams_t                           drs_params_;
 
   // | ----------------------- constraints ---------------------- |
 
-  mrs_msgs::DynamicsConstraints constraints_;
-  std::mutex                    mutex_constraints_;
+  mrs_msgs::msg::DynamicsConstraints constraints_;
+  std::mutex                         mutex_constraints_;
 
   // | --------- throttle generation and mass estimation -------- |
 
@@ -86,7 +93,7 @@ private:
   ControlOutput last_control_output_;
   ControlOutput activation_control_output_;
 
-  ros::Time         last_update_time_;
+  rclcpp::Time      last_update_time_;
   std::atomic<bool> first_iteration_ = true;
 };
 
@@ -98,65 +105,42 @@ private:
 
 /* //{ initialize() */
 
-bool PassthroughController::initialize(const ros::NodeHandle& nh, std::shared_ptr<mrs_uav_managers::control_manager::CommonHandlers_t> common_handlers,
+bool PassthroughController::initialize(const rclcpp::Node::SharedPtr &node, std::shared_ptr<mrs_uav_managers::control_manager::CommonHandlers_t> common_handlers,
                                    std::shared_ptr<mrs_uav_managers::control_manager::PrivateHandlers_t> private_handlers) {
 
-  nh_ = nh;
+  node_  = node;
+  clock_ = node_->get_clock();
 
   common_handlers_  = common_handlers;
   private_handlers_ = private_handlers;
 
   _uav_mass_ = common_handlers->getMass();
 
-  last_update_time_ = ros::Time(0);
-
-  ros::Time::waitForValid();
+  last_update_time_ = clock_->now();
 
   // | ------------------- loading parameters ------------------- |
 
-  bool success = true;
+  // add yaml config from the package's config folder
+  private_handlers->param_loader->addYamlFile(ament_index_cpp::get_package_share_directory("mrs_usv_controller_plugin") + "/config/passthrough_controller.yaml");
 
-  // FYI
-  // This method will load the file using `rosparam get`
-  //   Pros: you can the full power of the official param loading
-  //   Cons: it is slower
-  //
-  // Alternatives:
-  //   You can load the file directly into the ParamLoader as shown below.
+  // setup the dynamical reconfigure parameter manager
+  dynparam_mgr_ = std::make_shared<mrs_lib::DynparamMgr>(node_, mutex_dynparam_mgr_);  
+  dynparam_mgr_->get_param_provider().copyYamls(private_handlers->param_loader->getParamProvider());
 
-  success *= private_handlers->loadConfigFile(ros::package::getPath("mrs_usv_controller_plugin") + "/config/passthrough_controller.yaml");
-
-  if (!success) {
-    return false;
-  }
-
-  mrs_lib::ParamLoader param_loader(nh_, "PassthroughController");
-
-  // This is the alternaive way of loading the config file.
-  //
-  // Files loaded using this method are prioritized over ROS params.
-  //
-  // param_loader.addYamlFile(ros::package::getPath("example_tracker_plugin") + "/config/example_tracker.yaml");
-
-  param_loader.loadParam("publish_zero_outputs", drs_params_.publish_zero_outputs);
+  // setup dynamically-reconfigurable parameters
+  dynparam_mgr_->register_param("debug", &drs_params_.debug);
+  dynparam_mgr_->register_param("publish_zero_outputs", &drs_params_.publish_zero_outputs);
 
   // | ------------------ finish loading params ----------------- |
 
-  if (!param_loader.loadedSuccessfully()) {
-    ROS_ERROR("[%s]: could not load all parameters!", node_name.c_str());
+  if (!private_handlers->param_loader->loadedSuccessfully() || !dynparam_mgr_->loaded_successfully()) {
+    RCLCPP_ERROR(node_->get_logger(), "could not load all parameters!");
     return false;
   }
 
-  // | --------------- dynamic reconfigure server --------------- |
-
-  drs_.reset(new Drs_t(mutex_drs_, nh_));
-  drs_->updateConfig(drs_params_);
-  Drs_t::CallbackType f = boost::bind(&PassthroughController::callbackDrs, this, _1, _2);
-  drs_->setCallback(f);
-
   // | ----------------------- finish init ---------------------- |
 
-  ROS_INFO("[%s]: initialized", node_name.c_str());
+  RCLCPP_INFO(node_->get_logger(), "initialized");
 
   is_initialized_ = true;
 
@@ -167,15 +151,14 @@ bool PassthroughController::initialize(const ros::NodeHandle& nh, std::shared_pt
 
 /* //{ activate() */
 
-bool PassthroughController::activate(const ControlOutput& last_control_output) {
+bool PassthroughController::activate(const ControlOutput &last_control_output) {
 
   activation_control_output_ = last_control_output;
 
   first_iteration_ = true;
-
   is_active_ = true;
 
-  ROS_INFO("[%s]: activated", node_name.c_str());
+  RCLCPP_INFO(node_->get_logger(), "activated");
 
   return true;
 }
@@ -189,14 +172,26 @@ void PassthroughController::deactivate(void) {
   is_active_       = false;
   first_iteration_ = false;
 
-  ROS_INFO("[%s]: deactivated", node_name.c_str());
+  RCLCPP_INFO(node_->get_logger(), "deactivated");
+}
+
+//}
+
+/* //{ destroy() */
+
+void PassthroughController::destroy(void) {
+
+  is_active_       = false;
+  first_iteration_ = false;
+
+  RCLCPP_INFO(node_->get_logger(), "destroyed");
 }
 
 //}
 
 /* updateInactive() //{ */
 
-void PassthroughController::updateInactive(const mrs_msgs::UavState& uav_state, [[maybe_unused]] const std::optional<mrs_msgs::TrackerCommand>& tracker_command) {
+void PassthroughController::updateInactive(const mrs_msgs::msg::UavState &uav_state, [[maybe_unused]] const std::optional<mrs_msgs::msg::TrackerCommand> &tracker_command) {
 
   mrs_lib::set_mutexed(mutex_uav_state_, uav_state, uav_state_);
 
@@ -209,9 +204,9 @@ void PassthroughController::updateInactive(const mrs_msgs::UavState& uav_state, 
 
 /* //{ updateActive() */
 
-PassthroughController::ControlOutput PassthroughController::updateActive(const mrs_msgs::UavState& uav_state, const mrs_msgs::TrackerCommand& tracker_command) {
+PassthroughController::ControlOutput PassthroughController::updateActive(const mrs_msgs::msg::UavState &uav_state, const mrs_msgs::msg::TrackerCommand &tracker_command) {
 
-  auto drs_params = mrs_lib::get_mutexed(mutex_drs_params_, drs_params_);
+  auto drs_params = mrs_lib::get_mutexed(mutex_dynparam_mgr_, drs_params_);
 
   mrs_lib::set_mutexed(mutex_uav_state_, uav_state, uav_state_);
 
@@ -228,19 +223,24 @@ PassthroughController::ControlOutput PassthroughController::updateActive(const m
   // | -------- check for the available output modalities ------- |
 
   if (!common_handlers_->control_output_modalities.actuators) {
-    ROS_INFO_THROTTLE(1.0, "[%s]: desired actuators output modality is not available", node_name.c_str());
+    RCLCPP_INFO_THROTTLE(node_->get_logger(), *clock_, 1000, "desired actuator output modality is not available");
     drs_params.publish_zero_outputs = true; 
+    RCLCPP_INFO_THROTTLE(node_->get_logger(), *clock_, 1000, "publishing zero outputs");
   }
 
   // | ---------------- prepare the control output --------------- |
 
-  mrs_msgs::HwApiActuatorCmd actuator_cmd;
+  mrs_msgs::msg::HwApiActuatorCmd actuator_cmd;
 
-  if(!drs_params.publish_zero_outputs){
-    actuator_cmd.motors[0] = tracker_command.jerk.x;
-    actuator_cmd.motors[1] = tracker_command.jerk.y;
-    actuator_cmd.motors[2] = tracker_command.snap.x;
-    actuator_cmd.motors[3] = tracker_command.snap.y;
+  if(drs_params.publish_zero_outputs){
+    actuator_cmd.motors = {0,0,0,0};
+  } else {
+    actuator_cmd.motors = {
+      (float)tracker_command.jerk.x, 
+      (float)tracker_command.jerk.y, 
+      (float)tracker_command.snap.x, 
+      (float)tracker_command.snap.y
+    }; 
   }
 
   // | ----------------- set the control output ----------------- |
@@ -251,6 +251,10 @@ PassthroughController::ControlOutput PassthroughController::updateActive(const m
 
   last_control_output_.diagnostics.controller = "PassthroughController";
 
+  if(drs_params.debug) {
+    RCLCPP_INFO_THROTTLE(node_->get_logger(), *clock_, 1000,"Motors[0-1]: [%.3f, %.3f]. Motors[2-3]: [%.3f, %.3f]", actuator_cmd.motors[0], actuator_cmd.motors[1], actuator_cmd.motors[2], actuator_cmd.motors[3]);
+  }
+
   return last_control_output_;
 }
 
@@ -258,9 +262,9 @@ PassthroughController::ControlOutput PassthroughController::updateActive(const m
 
 /* //{ getStatus() */
 
-const mrs_msgs::ControllerStatus PassthroughController::getStatus() {
+const mrs_msgs::msg::ControllerStatus PassthroughController::getStatus() {
 
-  mrs_msgs::ControllerStatus controller_status;
+  mrs_msgs::msg::ControllerStatus controller_status;
 
   controller_status.active = is_active_;
 
@@ -271,7 +275,7 @@ const mrs_msgs::ControllerStatus PassthroughController::getStatus() {
 
 /* switchOdometrySource() //{ */
 
-void PassthroughController::switchOdometrySource([[maybe_unused]] const mrs_msgs::UavState& new_uav_state) {
+void PassthroughController::switchOdometrySource([[maybe_unused]] const mrs_msgs::msg::UavState &new_uav_state) {
 }
 
 //}
@@ -285,37 +289,22 @@ void PassthroughController::resetDisturbanceEstimators(void) {
 
 /* setConstraints() //{ */
 
-const mrs_msgs::DynamicsConstraintsSrvResponse::ConstPtr PassthroughController::setConstraints([
-    [maybe_unused]] const mrs_msgs::DynamicsConstraintsSrvRequest::ConstPtr& constraints) {
+const std::shared_ptr<mrs_msgs::srv::DynamicsConstraintsSrv::Response>
+PassthroughController::setConstraints([[maybe_unused]] const std::shared_ptr<mrs_msgs::srv::DynamicsConstraintsSrv::Request> &constraints) {
 
   if (!is_initialized_) {
-    return mrs_msgs::DynamicsConstraintsSrvResponse::ConstPtr(new mrs_msgs::DynamicsConstraintsSrvResponse());
+    return std::shared_ptr<mrs_msgs::srv::DynamicsConstraintsSrv::Response>(new mrs_msgs::srv::DynamicsConstraintsSrv::Response());
   }
 
   mrs_lib::set_mutexed(mutex_constraints_, constraints->constraints, constraints_);
 
-  ROS_INFO("[%s]: updating constraints", node_name.c_str());
+  RCLCPP_INFO(node_->get_logger(), "updating constraints");
 
-  mrs_msgs::DynamicsConstraintsSrvResponse res;
+  mrs_msgs::srv::DynamicsConstraintsSrv::Response res;
   res.success = true;
   res.message = "constraints updated";
 
-  return mrs_msgs::DynamicsConstraintsSrvResponse::ConstPtr(new mrs_msgs::DynamicsConstraintsSrvResponse(res));
-}
-
-//}
-
-// --------------------------------------------------------------
-// |                          callbacks                         |
-// --------------------------------------------------------------
-
-/* //{ callbackDrs() */
-
-void PassthroughController::callbackDrs(mrs_usv_controller_plugin::passthrough_controllerConfig& config, [[maybe_unused]] uint32_t level) {
-
-  mrs_lib::set_mutexed(mutex_drs_params_, config, drs_params_);
-
-  ROS_INFO("[%s]: dynamic reconfigure params updated", node_name.c_str());
+  return std::shared_ptr<mrs_msgs::srv::DynamicsConstraintsSrv::Response>(new mrs_msgs::srv::DynamicsConstraintsSrv::Response(res));
 }
 
 //}
@@ -324,5 +313,5 @@ void PassthroughController::callbackDrs(mrs_usv_controller_plugin::passthrough_c
 
 }  // namespace mrs_usv_controller_plugin
 
-#include <pluginlib/class_list_macros.h>
+#include <pluginlib/class_list_macros.hpp>
 PLUGINLIB_EXPORT_CLASS(mrs_usv_controller_plugin::passthrough_controller::PassthroughController, mrs_uav_managers::Controller)

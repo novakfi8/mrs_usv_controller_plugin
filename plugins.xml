@@ -1,17 +1,17 @@
-<library path="lib/libMrsUsvControllerPlugin_MrsUsvController">
-  <class name="mrs_usv_controller_plugin/MrsUsvController" type="mrs_usv_controller_plugin::mrs_usv_controller::MrsUsvController" base_class_type="mrs_uav_managers::Controller">
+<library path="MrsUsvControllerPlugin_MrsUsvController">
+  <class name="mrs_usv_controller_plugin::MrsUsvController" type="mrs_usv_controller_plugin::mrs_usv_controller::MrsUsvController" base_class_type="mrs_uav_managers::Controller">
     <description>This is the MRS USV Controller.</description>
   </class>
 </library>
 
-<library path="lib/libMrsUsvControllerPlugin_PassthroughController">
-  <class name="mrs_usv_controller_plugin/PassthroughController" type="mrs_usv_controller_plugin::passthrough_controller::PassthroughController" base_class_type="mrs_uav_managers::Controller">
+<library path="MrsUsvControllerPlugin_PassthroughController">
+  <class name="mrs_usv_controller_plugin::PassthroughController" type="mrs_usv_controller_plugin::passthrough_controller::PassthroughController" base_class_type="mrs_uav_managers::Controller">
     <description>This is the MRS USV Passthrough Controller.</description>
   </class>
 </library>
 
-<library path="lib/libMrsUsvControllerPlugin_PositionController">
-  <class name="mrs_usv_controller_plugin/PositionController" type="mrs_usv_controller_plugin::position_controller::PositionController" base_class_type="mrs_uav_managers::Controller">
+<library path="MrsUsvControllerPlugin_PositionController">
+  <class name="mrs_usv_controller_plugin::PositionController" type="mrs_usv_controller_plugin::position_controller::PositionController" base_class_type="mrs_uav_managers::Controller">
     <description>This is the MRS USV Position Controller.</description>
   </class>
 </library>

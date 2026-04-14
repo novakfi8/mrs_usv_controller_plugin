@@ -1,20 +1,20 @@
 /* includes //{ */
 
-#include <ros/ros.h>
-#include <ros/package.h>
-
-#include <pid.hpp>
+#include <rclcpp/rclcpp.hpp>
 
 #include <mrs_uav_managers/controller.h>
 
-#include <dynamic_reconfigure/server.h>
-#include <mrs_usv_controller_plugin/mrs_usv_controllerConfig.h>
-
+#include <mrs_lib/dynparam_mgr.h>
 #include <mrs_lib/param_loader.h>
 #include <mrs_lib/mutex.h>
+#include <mrs_lib/utils.h>
 #include <mrs_lib/attitude_converter.h>
 #include <mrs_lib/geometry/cyclic.h>
+#include <mrs_lib/dynparam_mgr.h>
 
+#include <pid.hpp>
+
+#include <ament_index_cpp/get_package_share_directory.hpp>
 //}
 
 namespace mrs_usv_controller_plugin
@@ -35,34 +35,70 @@ namespace PidController
 }
 //}
 
-  using sradians = mrs_lib::geometry::sradians;
+/* DrsParams_t //{ */
+
+struct DrsParams_t
+{
+  bool debug;
+  bool publish_zero_outputs;
+
+  bool   enforce_constraints;
+  bool   desired_heading_to_final_reference;
+  double max_cmd_velocity;
+  double max_cmd_heading_rate;
+  double horizontal_speed_constraint;
+  double vertical_asc_speed_constraint;
+  
+  double low_position_error;
+  double max_position_error;
+  double low_heading_error;
+  double max_heading_error;
+
+  double gain_position_p;
+  double gain_position_i;
+  double gain_position_d;
+  double saturation_position;
+  double antiwindup_position;
+  
+  double gain_heading_rate_p;
+  double gain_heading_rate_i;
+  double gain_heading_rate_d;
+  double saturation_heading_rate;
+  double antiwindup_heading_rate;
+};
+
+//}
 
 /* //{ class MrsUsvController */
 
 class MrsUsvController : public mrs_uav_managers::Controller {
 
 public:
-  bool initialize(const ros::NodeHandle& nh, std::shared_ptr<mrs_uav_managers::control_manager::CommonHandlers_t> common_handlers,
+  bool initialize(const rclcpp::Node::SharedPtr &node, std::shared_ptr<mrs_uav_managers::control_manager::CommonHandlers_t> common_handlers,
                   std::shared_ptr<mrs_uav_managers::control_manager::PrivateHandlers_t> private_handlers);
 
-  bool activate(const ControlOutput& last_control_output);
+  bool activate(const ControlOutput &last_control_output);
 
   void deactivate(void);
 
-  void updateInactive(const mrs_msgs::UavState& uav_state, const std::optional<mrs_msgs::TrackerCommand>& tracker_command);
+  void destroy(void);
 
-  ControlOutput updateActive(const mrs_msgs::UavState& uav_state, const mrs_msgs::TrackerCommand& tracker_command);
+  void updateInactive(const mrs_msgs::msg::UavState &uav_state, const std::optional<mrs_msgs::msg::TrackerCommand> &tracker_command);
 
-  const mrs_msgs::ControllerStatus getStatus();
+  ControlOutput updateActive(const mrs_msgs::msg::UavState &uav_state, const mrs_msgs::msg::TrackerCommand &tracker_command);
 
-  void switchOdometrySource(const mrs_msgs::UavState& new_uav_state);
+  const mrs_msgs::msg::ControllerStatus getStatus();
+
+  void switchOdometrySource(const mrs_msgs::msg::UavState &new_uav_state);
 
   void resetDisturbanceEstimators(void);
 
-  const mrs_msgs::DynamicsConstraintsSrvResponse::ConstPtr setConstraints(const mrs_msgs::DynamicsConstraintsSrvRequest::ConstPtr& cmd);
+  const std::shared_ptr<mrs_msgs::srv::DynamicsConstraintsSrv::Response>
+  setConstraints(const std::shared_ptr<mrs_msgs::srv::DynamicsConstraintsSrv::Request> &constraints);
 
 private:
-  ros::NodeHandle nh_;
+  rclcpp::Node::SharedPtr  node_;
+  rclcpp::Clock::SharedPtr clock_;
 
   std::string node_name = "MrsUsvController";
 
@@ -76,24 +112,20 @@ private:
 
   // | ------------------------ uav state ----------------------- |
 
-  mrs_msgs::UavState uav_state_;
-  std::mutex         mutex_uav_state_;
+  mrs_msgs::msg::UavState uav_state_;
+  std::mutex              mutex_uav_state_;
 
   // | --------------- dynamic reconfigure server --------------- |
-
-  boost::recursive_mutex                                      mutex_drs_;
-  typedef mrs_usv_controller_plugin::mrs_usv_controllerConfig DrsConfig_t;
-  typedef dynamic_reconfigure::Server<DrsConfig_t>            Drs_t;
-  boost::shared_ptr<Drs_t>                                    drs_;
-  void                                                        callbackDrs(mrs_usv_controller_plugin::mrs_usv_controllerConfig& config, uint32_t level);
-  DrsConfig_t                                                 drs_params_;
-  std::mutex                                                  mutex_drs_params_;
+  
+  std::shared_ptr<mrs_lib::DynparamMgr> dynparam_mgr_;
+  std::mutex                            mutex_dynparam_mgr_;
+  DrsParams_t                           drs_params_;
 
 
   // | ----------------------- constraints ---------------------- |
 
-  mrs_msgs::DynamicsConstraints constraints_;
-  std::mutex                    mutex_constraints_;
+  mrs_msgs::msg::DynamicsConstraints constraints_;
+  std::mutex                         mutex_constraints_;
 
   // | --------- throttle generation and mass estimation -------- |
 
@@ -104,7 +136,7 @@ private:
   ControlOutput last_control_output_;
   ControlOutput activation_control_output_;
 
-  ros::Time         last_update_time_;
+  rclcpp::Time      last_update_time_;
   std::atomic<bool> first_iteration_ = true;
 
   // | ----------------------- controller ----------------------- |
@@ -118,7 +150,7 @@ private:
   std::mutex mutex_pid_state_;
   
   // | -------------------------- utils ------------------------- |
-  int  stateMachineFunction(int pid_state, double heading_error, double position_error, DrsConfig_t drs_params);
+  int  stateMachineFunction(int pid_state, double heading_error, double position_error, DrsParams_t drs_params);
   double getHeading(double x1, double y1, double x2, double y2, double rescue_heading);
   std::string getHeadingRatePidStateName(int heading_rate_pid_state);
 };
@@ -131,80 +163,65 @@ private:
 
 /* //{ initialize() */
 
-bool MrsUsvController::initialize(const ros::NodeHandle& nh, std::shared_ptr<mrs_uav_managers::control_manager::CommonHandlers_t> common_handlers,
+bool MrsUsvController::initialize(const rclcpp::Node::SharedPtr &node, std::shared_ptr<mrs_uav_managers::control_manager::CommonHandlers_t> common_handlers,
                                    std::shared_ptr<mrs_uav_managers::control_manager::PrivateHandlers_t> private_handlers) {
 
-  nh_ = nh;
+  node_  = node;
+  clock_ = node_->get_clock();
 
   common_handlers_  = common_handlers;
   private_handlers_ = private_handlers;
 
   _uav_mass_ = common_handlers->getMass();
 
-  last_update_time_ = ros::Time(0);
-
-  ros::Time::waitForValid();
+  last_update_time_ = clock_->now();
 
   // | ------------------- loading parameters ------------------- |
-
-  bool success = true;
-
-  // FYI
-  // This method will load the file using `rosparam get`
-  //   Pros: you can the full power of the official param loading
-  //   Cons: it is slower
-  //
-  // Alternatives:
-  //   You can load the file directly into the ParamLoader as shown below.
-
-  success *= private_handlers->loadConfigFile(ros::package::getPath("mrs_usv_controller_plugin") + "/config/mrs_usv_controller.yaml");
-
-  if (!success) {
-    ROS_ERROR("[MrsUsvController]: could not load all parameters!");
-    return false;
-  }
-
-  mrs_lib::ParamLoader param_loader(nh_, "MrsUsvController");
-
-  // This is the alternaive way of loading the config file.
-  //
-  // Files loaded using this method are prioritized over ROS params.
-  //
-  // param_loader.addYamlFile(ros::package::getPath("mrs_usv_tracker_plugin") + "/config/mrs_usv_tracker.yaml");
-
-  param_loader.loadParam("debug", drs_params_.debug);
-  param_loader.loadParam("publish_zero_outputs", drs_params_.publish_zero_outputs);
   
-  param_loader.loadParam("desired_heading_to_final_reference", drs_params_.desired_heading_to_final_reference);
-  param_loader.loadParam("max_cmd_heading_rate", drs_params_.max_cmd_heading_rate);
-  param_loader.loadParam("max_cmd_velocity", drs_params_.max_cmd_velocity);
-  param_loader.loadParam("enforce_constraints", drs_params_.enforce_constraints);
-  param_loader.loadParam("horizontal_speed_constraint", drs_params_.horizontal_speed_constraint);
-  param_loader.loadParam("vertical_asc_speed_constraint", drs_params_.vertical_asc_speed_constraint);
+  // add yaml config from the package's config folder
+  private_handlers->param_loader->addYamlFile(ament_index_cpp::get_package_share_directory("mrs_usv_controller_plugin") + "/config/mrs_usv_controller.yaml");
+
+  // setup the dynamical reconfigure parameter manager
+  dynparam_mgr_ = std::make_shared<mrs_lib::DynparamMgr>(node_, mutex_dynparam_mgr_);  
+  dynparam_mgr_->get_param_provider().copyYamls(private_handlers->param_loader->getParamProvider());
+
+  // setup dynamically-reconfigurable parameters
+  dynparam_mgr_->register_param("debug", &drs_params_.debug);
+  dynparam_mgr_->register_param("publish_zero_outputs", &drs_params_.publish_zero_outputs);
   
-  param_loader.loadParam("low_position_error", drs_params_.low_position_error);
-  param_loader.loadParam("max_position_error", drs_params_.max_position_error);
-  param_loader.loadParam("low_heading_error", drs_params_.low_heading_error);
-  param_loader.loadParam("max_heading_error", drs_params_.max_heading_error);
- 
-  param_loader.loadParam("kp_position", drs_params_.kp_position);
-  param_loader.loadParam("kd_position", drs_params_.kd_position);
-  param_loader.loadParam("ki_position", drs_params_.ki_position);
-  param_loader.loadParam("saturation_position", drs_params_.saturation_position);
-  param_loader.loadParam("antiwindup_position", drs_params_.antiwindup_position);
-  pid_controller_position_.setParams(drs_params_.kp_position, drs_params_.kd_position, drs_params_.ki_position, drs_params_.saturation_position, drs_params_.antiwindup_position);
+  dynparam_mgr_->register_param("controller/enforce_constraints", &drs_params_.enforce_constraints);
+  dynparam_mgr_->register_param("controller/desired_heading_to_final_reference", &drs_params_.desired_heading_to_final_reference);
+  dynparam_mgr_->register_param("controller/max_cmd_velocity", &drs_params_.max_cmd_velocity, mrs_lib::DynparamMgr::range_t<double>(0.0, 10.0));
+  dynparam_mgr_->register_param("controller/max_cmd_heading_rate", &drs_params_.max_cmd_heading_rate, mrs_lib::DynparamMgr::range_t<double>(0.0, 10.0));
+  dynparam_mgr_->register_param("controller/horizontal_speed_constraint", &drs_params_.horizontal_speed_constraint, mrs_lib::DynparamMgr::range_t<double>(0.0, 10.0));
+  dynparam_mgr_->register_param("controller/vertical_asc_speed_constraint", &drs_params_.vertical_asc_speed_constraint, mrs_lib::DynparamMgr::range_t<double>(0.0, 10.0));
   
-  param_loader.loadParam("kp_heading_rate", drs_params_.kp_heading_rate);
-  param_loader.loadParam("kd_heading_rate", drs_params_.kd_heading_rate);
-  param_loader.loadParam("ki_heading_rate", drs_params_.ki_heading_rate);
-  param_loader.loadParam("saturation_heading_rate", drs_params_.saturation_heading_rate);
-  param_loader.loadParam("antiwindup_heading_rate", drs_params_.antiwindup_heading_rate);
-  pid_controller_heading_rate_.setParams(drs_params_.kp_heading_rate, drs_params_.kd_heading_rate, drs_params_.ki_heading_rate, drs_params_.saturation_heading_rate, drs_params_.antiwindup_heading_rate);
+  dynparam_mgr_->register_param("state_machine/low_position_error", &drs_params_.low_position_error, mrs_lib::DynparamMgr::range_t<double>(0.0, 10.0));
+  dynparam_mgr_->register_param("state_machine/max_position_error", &drs_params_.max_position_error, mrs_lib::DynparamMgr::range_t<double>(0.0, 10.0));
+  dynparam_mgr_->register_param("state_machine/low_heading_error", &drs_params_.low_heading_error, mrs_lib::DynparamMgr::range_t<double>(0.0, 10.0));
+  dynparam_mgr_->register_param("state_machine/max_heading_error", &drs_params_.max_heading_error, mrs_lib::DynparamMgr::range_t<double>(0.0, 10.0));
+  
+  dynparam_mgr_->register_param("pid_position/gain_position_p", &drs_params_.gain_position_p, mrs_lib::DynparamMgr::range_t<double>(0.0, 100.0));
+  dynparam_mgr_->register_param("pid_position/gain_position_i", &drs_params_.gain_position_i, mrs_lib::DynparamMgr::range_t<double>(0.0, 100.0));
+  dynparam_mgr_->register_param("pid_position/gain_position_d", &drs_params_.gain_position_d, mrs_lib::DynparamMgr::range_t<double>(0.0, 100.0));
+  dynparam_mgr_->register_param("pid_position/saturation_position", &drs_params_.saturation_position, mrs_lib::DynparamMgr::range_t<double>(0.0, 100.0));
+  dynparam_mgr_->register_param("pid_position/antiwindup_position", &drs_params_.antiwindup_position, mrs_lib::DynparamMgr::range_t<double>(0.0, 100.0));
+  
+  dynparam_mgr_->register_param("pid_heading/gain_heading_rate_p", &drs_params_.gain_heading_rate_p, mrs_lib::DynparamMgr::range_t<double>(0.0, 100.0));
+  dynparam_mgr_->register_param("pid_heading/gain_heading_rate_i", &drs_params_.gain_heading_rate_i, mrs_lib::DynparamMgr::range_t<double>(0.0, 100.0));
+  dynparam_mgr_->register_param("pid_heading/gain_heading_rate_d", &drs_params_.gain_heading_rate_d, mrs_lib::DynparamMgr::range_t<double>(0.0, 100.0));
+  dynparam_mgr_->register_param("pid_heading/saturation_heading_rate", &drs_params_.saturation_heading_rate, mrs_lib::DynparamMgr::range_t<double>(0.0, 100.0));
+  dynparam_mgr_->register_param("pid_heading/antiwindup_heading_rate", &drs_params_.antiwindup_heading_rate, mrs_lib::DynparamMgr::range_t<double>(0.0, 100.0));
+
+  // | ----------------------- prepare PID ---------------------- |
+
+  pid_controller_position_.setParams(drs_params_.gain_position_p, drs_params_.gain_position_i, drs_params_.gain_position_d, drs_params_.saturation_position, drs_params_.antiwindup_position);
+  pid_controller_heading_rate_.setParams(drs_params_.gain_heading_rate_p, drs_params_.gain_heading_rate_i, drs_params_.gain_heading_rate_d, drs_params_.saturation_heading_rate, drs_params_.antiwindup_heading_rate);
 
   // | ------------------ finish loading params ----------------- |
 
-  if (!param_loader.loadedSuccessfully()) {
-    ROS_ERROR("[MrsUsvController]: could not load all parameters!");
+  if (!private_handlers->param_loader->loadedSuccessfully() || !dynparam_mgr_->loaded_successfully()) {
+    RCLCPP_ERROR(node_->get_logger(), "could not load all parameters!");
     return false;
   }
 
@@ -212,16 +229,9 @@ bool MrsUsvController::initialize(const ros::NodeHandle& nh, std::shared_ptr<mrs
   
   pid_state_ = PidController::states::idle;
 
-  // | --------------- dynamic reconfigure server --------------- |
-
-  drs_.reset(new Drs_t(mutex_drs_, nh_));
-  drs_->updateConfig(drs_params_);
-  Drs_t::CallbackType f = boost::bind(&MrsUsvController::callbackDrs, this, _1, _2);
-  drs_->setCallback(f);
-
   // | ----------------------- finish init ---------------------- |
 
-  ROS_INFO("[MrsUsvController]: initialized");
+  RCLCPP_INFO(node_->get_logger(), "initialized");
 
   is_initialized_ = true;
 
@@ -232,15 +242,14 @@ bool MrsUsvController::initialize(const ros::NodeHandle& nh, std::shared_ptr<mrs
 
 /* //{ activate() */
 
-bool MrsUsvController::activate(const ControlOutput& last_control_output) {
+bool MrsUsvController::activate(const ControlOutput &last_control_output) {
 
   activation_control_output_ = last_control_output;
 
   first_iteration_ = true;
+  is_active_       = true;
 
-  is_active_ = true;
-
-  ROS_INFO("[MrsUsvController]: activated");
+  RCLCPP_INFO(node_->get_logger(), "activated");
 
   return true;
 }
@@ -257,14 +266,26 @@ void MrsUsvController::deactivate(void) {
   pid_controller_position_.reset();
   pid_controller_heading_rate_.reset();
 
-  ROS_INFO("[MrsUsvController]: deactivated");
+  RCLCPP_INFO(node_->get_logger(), "deactivated");
+}
+
+//}
+
+/* //{ destroy() */
+
+void MrsUsvController::destroy(void) {
+
+  is_active_       = false;
+  first_iteration_ = false;
+
+  RCLCPP_INFO(node_->get_logger(), "destroyed");
 }
 
 //}
 
 /* updateInactive() //{ */
 
-void MrsUsvController::updateInactive(const mrs_msgs::UavState& uav_state, [[maybe_unused]] const std::optional<mrs_msgs::TrackerCommand>& tracker_command) {
+void MrsUsvController::updateInactive(const mrs_msgs::msg::UavState &uav_state, [[maybe_unused]] const std::optional<mrs_msgs::msg::TrackerCommand> &tracker_command) {
 
   mrs_lib::set_mutexed(mutex_uav_state_, uav_state, uav_state_);
 
@@ -277,9 +298,10 @@ void MrsUsvController::updateInactive(const mrs_msgs::UavState& uav_state, [[may
 
 /* //{ updateActive() */
 
-MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::UavState& uav_state, const mrs_msgs::TrackerCommand& tracker_command) {
+MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::msg::UavState &uav_state, const mrs_msgs::msg::TrackerCommand &tracker_command) {
 
-  auto drs_params = mrs_lib::get_mutexed(mutex_drs_params_, drs_params_);
+  auto drs_params = mrs_lib::get_mutexed(mutex_dynparam_mgr_, drs_params_);
+  /* auto constraints = mrs_lib::get_mutexed(mutex_constraints_, constraints_); */
 
   mrs_lib::set_mutexed(mutex_uav_state_, uav_state, uav_state_);
 
@@ -302,18 +324,18 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
     dt               = 0.01;
     first_iteration_ = false;
   } else {
-    dt = (uav_state.header.stamp - last_update_time_).toSec();
+    dt = rclcpp::Time(uav_state.header.stamp).seconds() - last_update_time_.seconds();
   }
 
-  last_update_time_ = uav_state.header.stamp;
+  last_update_time_ = rclcpp::Time(uav_state.header.stamp);
 
   if (fabs(dt) < 0.001) {
-    ROS_DEBUG("[MrsUsvController]: the last odometry message came too close (%.2f s)!", dt);
+    RCLCPP_WARN(node_->get_logger(), "the last odometry message came too close (%.2f s)!", dt);
     dt = 0.01;
   }
   
   if (dt < 0.0) {
-    ROS_ERROR("[MrsUsvController]: the last odometry message came from future (%.2f s)!", dt);
+    RCLCPP_ERROR(node_->get_logger(), "the last odometry message came from future (%.2f s)!", dt);
     dt = 0.01;
   }
 
@@ -321,7 +343,7 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
 
   // you can decide what to return, but it needs to be available
   if (!common_handlers_->control_output_modalities.velocity_hdg_rate) {
-    ROS_ERROR_THROTTLE(1.0, "[MrsUsvController]: desired velocity and heading rate output modality is not available");
+    RCLCPP_INFO_THROTTLE(node_->get_logger(), *clock_, 1000, "desired velocity and heading rate output modality is not available");
     drs_params.publish_zero_outputs = true; 
   }
 
@@ -341,7 +363,7 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
 
   // | -------------- prepare the control reference ------------- |
 
-  geometry_msgs::PoseStamped position_reference;
+  geometry_msgs::msg::PoseStamped position_reference;
 
   position_reference.header           = tracker_command.header;
   position_reference.pose.position    = tracker_command.position;
@@ -349,7 +371,7 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   
   Eigen::Vector2d position_reference_vec(position_reference.pose.position.x, position_reference.pose.position.y);
 
-  geometry_msgs::PoseStamped final_position_reference;
+  geometry_msgs::msg::PoseStamped final_position_reference;
   final_position_reference.header           = tracker_command.full_state_prediction.header;
   final_position_reference.pose.orientation = mrs_lib::AttitudeConverter(0, 0, 0).setHeading(tracker_command.full_state_prediction.heading.back());
   final_position_reference.pose.position    = tracker_command.full_state_prediction.position.back();
@@ -368,7 +390,11 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   
   Eigen::Vector2d position_error_vec = position_reference_vec - usv_position_vec;
   Eigen::Vector2d final_position_error_vec = final_position_reference_vec - usv_position_vec;
-  double heading_error = sradians::diff(desired_heading, usv_heading);
+  double heading_error = mrs_lib::geometry::sradians::diff(desired_heading, usv_heading);
+
+  // | --------------- update the PIDs parameters --------------- |
+  pid_controller_position_.setParams(drs_params.gain_position_p, drs_params.gain_position_i, drs_params.gain_position_d, drs_params.saturation_position, drs_params.antiwindup_position);
+  pid_controller_heading_rate_.setParams(drs_params.gain_heading_rate_p, drs_params.gain_heading_rate_i, drs_params.gain_heading_rate_d, drs_params.saturation_heading_rate, drs_params.antiwindup_heading_rate);
 
   // | -------------- compute heading rate command -------------- |
   
@@ -408,7 +434,7 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   double position_error_max = std::max({position_error_vec.norm(), final_position_error_vec.norm()});
   pid_state_ = stateMachineFunction(pid_state_, heading_error, position_error_max, drs_params);
 
-  mrs_msgs::HwApiVelocityHdgRateCmd velocity_heading_rate_cmd;
+  mrs_msgs::msg::HwApiVelocityHdgRateCmd velocity_heading_rate_cmd;
   if(pid_state_ == PidController::states::idle){
     velocity_heading_rate_cmd.heading_rate = 0; 
     velocity_heading_rate_cmd.velocity.x = 0;
@@ -429,7 +455,7 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   }
   else{
     drs_params.publish_zero_outputs = true; 
-    ROS_ERROR("[MrsUsvController]: Unknown state of heading rate PID: %d", pid_state_);
+    RCLCPP_ERROR(node_->get_logger(), "Unknown state of heading rate PID: %d", pid_state_);
   }
   
   // | ----------------- check for zero outputs ----------------- |
@@ -469,11 +495,11 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
   // | ---------------------- debug prints ---------------------- |
   
   if(drs_params.debug) {
-    ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Heading rate PID state: %s. Heading rate command: %.3f. Velocity command: [%.3f, %.3f, %.3f]", getHeadingRatePidStateName(pid_state_).c_str(), cmd_heading_rate, velocity_heading_rate_cmd.velocity.x, velocity_heading_rate_cmd.velocity.y, velocity_heading_rate_cmd.velocity.z);
-    ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Position reference: [%.3f, %.3f, %.3f]. Heading desired: %.3f.", position_reference.pose.position.x, position_reference.pose.position.y,position_reference.pose.position.z, desired_heading);
-    ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Current position: [%.3f, %.3f, %.3f]. Current heading: %.3f.", uav_state.pose.position.x, uav_state.pose.position.y, uav_state.pose.position.z, usv_heading);
-    ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: Heading error: %.3f. Position error: %.3f.", heading_error, position_error_vec.norm());
-    ROS_INFO_THROTTLE(1.0, "[MrsUsvController]: -------------------------------------------------------------");
+    RCLCPP_INFO_THROTTLE(node_->get_logger(), *clock_, 1000, "Heading rate PID state: %s. Heading rate command: %.3f. Velocity command: [%.3f, %.3f, %.3f]", getHeadingRatePidStateName(pid_state_).c_str(), cmd_heading_rate, velocity_heading_rate_cmd.velocity.x, velocity_heading_rate_cmd.velocity.y, velocity_heading_rate_cmd.velocity.z);
+    RCLCPP_INFO_THROTTLE(node_->get_logger(), *clock_, 1000, "Position reference: [%.3f, %.3f, %.3f]. Heading desired: %.3f.", position_reference.pose.position.x, position_reference.pose.position.y,position_reference.pose.position.z, desired_heading);
+    RCLCPP_INFO_THROTTLE(node_->get_logger(), *clock_, 1000, "Current position: [%.3f, %.3f, %.3f]. Current heading: %.3f.", uav_state.pose.position.x, uav_state.pose.position.y, uav_state.pose.position.z, usv_heading);
+    RCLCPP_INFO_THROTTLE(node_->get_logger(), *clock_, 1000, "Heading error: %.3f. Position error: %.3f.", heading_error, position_error_vec.norm());
+    RCLCPP_INFO_THROTTLE(node_->get_logger(), *clock_, 1000, "-------------------------------------------------------------");
   }
 
   return last_control_output_;
@@ -483,9 +509,9 @@ MrsUsvController::ControlOutput MrsUsvController::updateActive(const mrs_msgs::U
 
 /* //{ getStatus() */
 
-const mrs_msgs::ControllerStatus MrsUsvController::getStatus() {
+const mrs_msgs::msg::ControllerStatus MrsUsvController::getStatus() {
 
-  mrs_msgs::ControllerStatus controller_status;
+  mrs_msgs::msg::ControllerStatus controller_status;
 
   controller_status.active = is_active_;
 
@@ -496,7 +522,7 @@ const mrs_msgs::ControllerStatus MrsUsvController::getStatus() {
 
 /* switchOdometrySource() //{ */
 
-void MrsUsvController::switchOdometrySource([[maybe_unused]] const mrs_msgs::UavState& new_uav_state) {
+void MrsUsvController::switchOdometrySource([[maybe_unused]] const mrs_msgs::msg::UavState &new_uav_state) {
 }
 
 //}
@@ -510,29 +536,29 @@ void MrsUsvController::resetDisturbanceEstimators(void) {
 
 /* setConstraints() //{ */
 
-const mrs_msgs::DynamicsConstraintsSrvResponse::ConstPtr MrsUsvController::setConstraints([
-    [maybe_unused]] const mrs_msgs::DynamicsConstraintsSrvRequest::ConstPtr& constraints) {
+const std::shared_ptr<mrs_msgs::srv::DynamicsConstraintsSrv::Response>
+MrsUsvController::setConstraints([[maybe_unused]] const std::shared_ptr<mrs_msgs::srv::DynamicsConstraintsSrv::Request> &constraints) {
 
   if (!is_initialized_) {
-    return mrs_msgs::DynamicsConstraintsSrvResponse::ConstPtr(new mrs_msgs::DynamicsConstraintsSrvResponse());
+    return std::shared_ptr<mrs_msgs::srv::DynamicsConstraintsSrv::Response>(new mrs_msgs::srv::DynamicsConstraintsSrv::Response());
   }
 
   mrs_lib::set_mutexed(mutex_constraints_, constraints->constraints, constraints_);
 
-  ROS_INFO("[MrsUsvController]: updating constraints");
+  RCLCPP_INFO(node_->get_logger(), "updating constraints");
 
-  mrs_msgs::DynamicsConstraintsSrvResponse res;
+  mrs_msgs::srv::DynamicsConstraintsSrv::Response res;
   res.success = true;
   res.message = "constraints updated";
 
-  return mrs_msgs::DynamicsConstraintsSrvResponse::ConstPtr(new mrs_msgs::DynamicsConstraintsSrvResponse(res));
+  return std::shared_ptr<mrs_msgs::srv::DynamicsConstraintsSrv::Response>(new mrs_msgs::srv::DynamicsConstraintsSrv::Response(res));
 }
 
 //}
 
 /* stateMachineFunction() //{ */
 
-int  MrsUsvController::stateMachineFunction(int pid_state, double heading_error, double position_error, DrsConfig_t drs_params) {
+int  MrsUsvController::stateMachineFunction(int pid_state, double heading_error, double position_error, DrsParams_t drs_params) {
     heading_error = std::abs(heading_error);  
     /* idle state */ 
     if(pid_state == PidController::states::idle){
@@ -571,29 +597,8 @@ int  MrsUsvController::stateMachineFunction(int pid_state, double heading_error,
       }
       return PidController::states::heading_and_velocity; 
     } 
-    ROS_ERROR("[MrsUsvController]: Unknown state in pid_state: %d! Switch to idle.", pid_state);
+    RCLCPP_ERROR(node_->get_logger(), "Unknown state in pid_state: %d! Switch to idle.", pid_state);
     return PidController::states::idle;
-}
-
-//}
-
-// --------------------------------------------------------------
-// |                          callbacks                         |
-// --------------------------------------------------------------
-
-/* //{ callbackDrs() */
-
-void MrsUsvController::callbackDrs(mrs_usv_controller_plugin::mrs_usv_controllerConfig& config, [[maybe_unused]] uint32_t level) {
-
-  mrs_lib::set_mutexed(mutex_drs_params_, config, drs_params_);
-  
-  {
-    std::scoped_lock lock(mutex_position_pid_, mutex_heading_rate_pid_);
-    pid_controller_position_.setParams(drs_params_.kp_position, drs_params_.kd_position, drs_params_.ki_position, drs_params_.saturation_position, drs_params_.antiwindup_position); 
-    pid_controller_heading_rate_.setParams(drs_params_.kp_heading_rate, drs_params_.kd_heading_rate, drs_params_.ki_heading_rate, drs_params_.saturation_heading_rate, drs_params_.antiwindup_heading_rate); 
-  } 
-
-  ROS_INFO("[MrsUsvController]: dynamic reconfigure params updated");
 }
 
 //}
@@ -606,7 +611,7 @@ void MrsUsvController::callbackDrs(mrs_usv_controller_plugin::mrs_usv_controller
 double MrsUsvController::getHeading(double x1, double y1, double x2, double y2, double rescue_heading) {
   if (x1 == x2 && y1 == y2)
   {
-    ROS_WARN("[%s] Trying to get heading between one same point!", node_name.c_str()); 
+    RCLCPP_WARN(node_->get_logger(), "Trying to get heading between one same point!");
     return rescue_heading;
   }
 
@@ -639,5 +644,5 @@ std::string MrsUsvController::getHeadingRatePidStateName(int heading_rate_pid_st
 
 }  // namespace mrs_usv_controller_plugin
 
-#include <pluginlib/class_list_macros.h>
+#include <pluginlib/class_list_macros.hpp>
 PLUGINLIB_EXPORT_CLASS(mrs_usv_controller_plugin::mrs_usv_controller::MrsUsvController, mrs_uav_managers::Controller)

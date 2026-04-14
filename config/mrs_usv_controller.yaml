@@ -1,36 +1,40 @@
-# Parameters for MRS USV controller
-debug: True
-publish_zero_outputs: False 
+mrs_uav_controllers:
 
-## | ----------------------- controller ----------------------- #
-desired_heading_to_final_reference: False
-max_cmd_velocity: 1.5
-max_cmd_heading_rate: 0.5
-enforce_constraints: True
-horizontal_speed_constraint: 3.0
-vertical_asc_speed_constraint: 0.0
+  mrs_usv_controller_plugin:
+    
+    mrs_usv_controller:
+      debug: True
+      publish_zero_outputs: False 
 
-## | --------------------- state machines --------------------- #
-low_position_error: 0.7
-max_position_error: 1.0 
+      ## | ----------------------- controller ----------------------- #
+      controller:   
+        enforce_constraints: True
+        desired_heading_to_final_reference: False
+        max_cmd_velocity: 1.5
+        max_cmd_heading_rate: 0.5
+        horizontal_speed_constraint: 3.0
+        vertical_asc_speed_constraint: 0.0
 
-low_heading_error: 0.35
-max_heading_error: 0.5
+      ## | --------------------- state machine ---------------------- #
+      state_machine:   
+        low_position_error: 0.7
+        max_position_error: 1.0 
+        low_heading_error: 0.35
+        max_heading_error: 0.5
 
-## | --------------------- PID - position --------------------- #
-kp_position: 0.4
-kd_position: 0.01
-ki_position: 0.001
-saturation_position: 2.0
-antiwindup_position: 5.0
+      ## | --------------------- PID - position --------------------- #
+      pid_position:   
+        gain_position_p: 0.4
+        gain_position_i: 0.001
+        gain_position_d: 0.01
+        saturation_position: 2.0
+        antiwindup_position: 5.0
 
-## | ---------------------- PID - heading --------------------- #
-kp_heading_rate: 1.0
-kd_heading_rate: 0.01
-ki_heading_rate: 0.001
-saturation_heading_rate: 0.5
-antiwindup_heading_rate: 0.5
-
-
-
+      ## | ---------------------- PID - heading --------------------- #
+      pid_heading:   
+        gain_heading_rate_p: 1.0
+        gain_heading_rate_i: 0.001
+        gain_heading_rate_d: 0.01
+        saturation_heading_rate: 0.5
+        antiwindup_heading_rate: 0.5
 
