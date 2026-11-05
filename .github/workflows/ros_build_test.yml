@@ -3,96 +3,22 @@ name: ros_build_test
 on:
 
   push:
+    paths-ignore:
+      - '**/README.md'
+
   pull_request:
 
   workflow_dispatch:
 
-# concurrency:
-#   group: ${{ github.ref }}
-#   cancel-in-progress: true
+  schedule:
+    - cron: "0 2 * * 0"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
 
-  build_amd64:
-    runs-on: ubuntu-20.04
-
-    steps:
-
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-          submodules: 'recursive'
-
-      - name: Checkout CI scripts
-        uses: actions/checkout@v3
-        with:
-          repository: ctu-mrs/ci_scripts
-          ref: master
-          path: .ci_scripts
-
-      - name: Update submodules
-        run: |
-           sudo pip3 install -U gitman
-           [[ -e .gitman.yml || -e .gitman.yaml ]] && [[ ! -e .gitman_ignore ]] && gitman install || echo "no gitman modules to install"
-
-      - name: Build
-        run: |
-          mkdir -p /tmp/artifacts
-          .ci_scripts/package_build/build_package.sh $GITHUB_WORKSPACE /tmp/artifacts
-
-  build_arm64:
-
-    runs-on: ubuntu-20.04
-    
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-          submodules: 'recursive'
-
-      - name: Checkout CI scripts
-        uses: actions/checkout@v3
-        with:
-          repository: ctu-mrs/ci_scripts
-          ref: master
-          path: .ci_scripts
-
-      - name: Update submodules
-        run: |
-           sudo pip3 install -U gitman
-           [[ -e .gitman.yml || -e .gitman.yaml ]] && [[ ! -e .gitman_ignore ]] && gitman install || echo "no gitman modules to install"
-
-      - uses: ctu-mrs/run-on-arch-action@master
-        name: Build artifact
-
-        id: build
-
-        with:
-          arch: aarch64
-          distro: noetic
-
-          githubToken: ${{ github.token }}
-
-          # Create an artifacts directory
-          setup: |
-            mkdir -p "/tmp/artifacts"
-            mkdir -p "/tmp/repository"
-
-          # Mount the artifacts directory as /artifacts in the container
-          dockerRunArgs: |
-            --volume "$PWD:/tmp/repository"
-            --volume "/tmp/artifacts:/tmp/artifacts"
-
-          # The shell to run commands with in the container
-          shell: /bin/sh
-
-          install: |
-            apt-get update -q -y
-            apt-get upgrade -q -y
-
-          # Produce a binary artifact and place it in the mounted volume
-          run: |
-            git config --global --add safe.directory "*"
-            /tmp/repository/.ci_scripts/package_build/build_package.sh /tmp/repository /tmp/artifacts
+  build:
+    uses: ctu-mrs/ci_scripts/.github/workflows/ros_build_test.yml@ros2
 
